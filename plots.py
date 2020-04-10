@@ -93,11 +93,11 @@ def plot_triplet_losses(log_dir, epochs, figure_name="triplet_losses.png"):
         #fig = plt.figure()
         #, label='Triplet loss'
         plt.plot(epoch_list, triplet_loss_list, color='red')
-        plt.ylim([0.0, max(triplet_loss_list)])
+        #plt.ylim([0.0, max(triplet_loss_list)])
         plt.xlim([1, epochs + 1])
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
         plt.title('Triplet losses plot')
-        plt.legend(loc='upper left')
+        #plt.legend(loc='upper left')
         #fig.savefig(figure_name, dpi=fig.dpi)
         plt.savefig(figure_name)

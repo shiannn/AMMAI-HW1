@@ -21,9 +21,12 @@ from models.resnet101 import Resnet101Triplet
 from models.inceptionresnetv2 import InceptionResnetV2Triplet
 
 logging.basicConfig(level=logging.INFO)
-os.remove("plots/triplet_losses_resnet34.png")
-os.remove("logs/resnet34_log_triplet.txt")
-
+try:
+    os.remove("plots/triplet_losses_resnet34.png")
+    os.remove("logs/resnet34_log_triplet.txt")
+except OSError:
+    pass
+    
 parser = argparse.ArgumentParser(description="Training FaceNet facial recognition model using Triplet Loss.")
 # Dataset
 parser.add_argument('--dataroot', '-d', type=str, required=True,
