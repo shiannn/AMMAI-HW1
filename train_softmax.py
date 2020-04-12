@@ -1,79 +1,70 @@
-import logging
 import numpy as np
 import time
 import argparse
+import logging
 import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torchvision
 import torchvision.transforms as transforms
 from torch.nn.modules.distance import PairwiseDistance
+from torch.utils.data import DataLoader, Subset
+from losses.center_loss import CenterLoss
 from dataloaders.APDDataset import APDDataset
-from losses.triplet_loss import TripletLoss
-from dataloaders.triplet_loss_dataloader import TripletFaceDataset
 from validate_on_LFW import evaluate_lfw
-from plots import plot_roc_lfw, plot_accuracy_lfw, plot_triplet_losses
+from plots import plot_roc_lfw, plot_accuracy_lfw, plot_training_validation_losses_center
 from tqdm import tqdm
-from models.resnet18 import Resnet18Triplet
-from models.resnet34 import Resnet34Triplet
-from models.resnet50 import Resnet50Triplet
-from models.resnet101 import Resnet101Triplet
-from models.inceptionresnetv2 import InceptionResnetV2Triplet
-from pathlib import Path
-import shutil
+from models.resnet18 import Resnet18Center
+from models.resnet34 import Resnet34Center
+from models.resnet50 import Resnet50Center
+from models.resnet101 import Resnet101Center
+from models.inceptionresnetv2 import InceptionResnetV2Center
+from PIL import ImageFile
 
 
-logging.basicConfig(filename="training.log", level=logging.INFO)
-shutil.rmtree("plots/roc_plots")
-rocFolder = Path("plots") / Path("roc_plots")
-rocFolder.mkdir(exist_ok=True)
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
+logging.basicConfig(level=logging.INFO)
 try:
-    os.remove("plots/triplet_losses_resnet34.png")
-    os.remove("plots/apd_accuracies_resnet34_triplet.png")
-    os.remove("logs/resnet34_log_triplet.txt")
+    os.remove("plots/training_validation_losses_resnet34_center.png")
+    os.remove("logs/resnet34_log_center.txt")
 except OSError:
     pass
 
-parser = argparse.ArgumentParser(description="Training FaceNet facial recognition model using Triplet Loss.")
+parser = argparse.ArgumentParser(description="Training FaceNet facial recognition model using Cross Entropy Loss with Center Loss.")
 # Dataset
 parser.add_argument('--dataroot', '-d', type=str, required=True,
                     help="(REQUIRED) Absolute path to the dataset folder"
                     )
-# APD
+# LFW
 parser.add_argument('--apd', type=str, required=True,
                     help="(REQUIRED) Absolute path to the labeled faces in the wild dataset folder"
-                    )
-parser.add_argument('--dataset_csv', type=str, default='datasets/vggface2_full.csv',
-                    help="Path to the csv file containing the image paths of the training dataset."
                     )
 parser.add_argument('--apd_batch_size', default=32, type=int,
                     help="Batch size for APD dataset (default: 64)"
                     )
-parser.add_argument('--apd_validation_epoch_interval', default=1, type=int,
-                    help="Perform APD validation every n epoch interval (default: every 1 epoch)"
+parser.add_argument('--apd_validation_epoch_interval', default=5, type=int,
+                    help="Perform APD validation every n epoch interval (default: every 5 epochs)"
                     )
 # Training settings
 parser.add_argument('--model', type=str, default="resnet34", choices=["resnet18", "resnet34", "resnet50", "resnet101", "inceptionresnetv2"],
     help="The required model architecture for training: ('resnet18','resnet34', 'resnet50', 'resnet101', 'inceptionresnetv2'), (default: 'resnet34')"
                     )
-parser.add_argument('--epochs', default=30, type=int,
-                    help="Required training epochs (default: 30)"
-                    )
-parser.add_argument('--training_triplets_path', default=None, type=str,
-    help="Path to training triplets numpy file in 'datasets/' folder to skip training triplet generation step."
-                    )
-parser.add_argument('--num_triplets_train', default=100000, type=int,
-                    help="Number of triplets for training (default: 100000)"
+parser.add_argument('--epochs', default=20, type=int,
+                    help="Required training epochs (default: 275)"
                     )
 parser.add_argument('--resume_path', default='',  type=str,
     help='path to latest model checkpoint: (Model_training_checkpoints/model_resnet34_epoch_0.pt file) (default: None)'
                     )
 parser.add_argument('--batch_size', default=64, type=int,
-                    help="Batch size (default: 64)"
+                    help="Batch size (default: 128)"
                     )
 parser.add_argument('--num_workers', default=4, type=int,
                     help="Number of workers for data loaders (default: 4)"
+                    )
+parser.add_argument('--valid_split', default=0.01, type=float,
+                    help="Validation dataset percentage to be used from the dataset (default: 0.01)"
                     )
 parser.add_argument('--embedding_dim', default=128, type=int,
                     help="Dimension of the embedding vector (default: 128)"
@@ -87,8 +78,11 @@ parser.add_argument('--optimizer', type=str, default="sgd", choices=["sgd", "ada
 parser.add_argument('--lr', default=0.1, type=float,
                     help="Learning rate for the optimizer (default: 0.1)"
                     )
-parser.add_argument('--margin', default=0.5, type=float,
-                    help='margin for triplet loss (default: 0.5)'
+parser.add_argument('--center_loss_lr', default=0.5, type=float,
+                    help="Learning rate for center loss (default: 0.5)"
+                    )
+parser.add_argument('--center_loss_weight', default=0.007, type=float,
+                    help="Center loss weight (default: 0.007)"
                     )
 args = parser.parse_args()
 
@@ -96,21 +90,20 @@ args = parser.parse_args()
 def main():
     dataroot = args.dataroot
     apd_dataroot = args.apd
-    dataset_csv = args.dataset_csv
     apd_batch_size = args.apd_batch_size
     apd_validation_epoch_interval = args.apd_validation_epoch_interval
     model_architecture = args.model
     epochs = args.epochs
-    training_triplets_path = args.training_triplets_path
-    num_triplets_train = args.num_triplets_train
     resume_path = args.resume_path
     batch_size = args.batch_size
     num_workers = args.num_workers
+    validation_dataset_split_ratio = args.valid_split
     embedding_dimension = args.embedding_dim
     pretrained = args.pretrained
     optimizer = args.optimizer
     learning_rate = args.lr
-    margin = args.margin
+    learning_rate_center_loss = args.center_loss_lr
+    center_loss_weight = args.center_loss_weight
     start_epoch = 0
 
     # Define image data pre-processing transforms
@@ -119,8 +112,8 @@ def main():
 
     #  Size 182x182 RGB image -> Center crop size 160x160 RGB image for more model generalization
     data_transforms = transforms.Compose([
-        #transforms.RandomCrop(size=10),
-        transforms.Resize(size=(50,50)),
+        #transforms.RandomCrop(size=50),
+        transforms.Resize(size=(160,160)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize(
@@ -137,20 +130,44 @@ def main():
         )
     ])
 
-    logging.info('prepare VGGNet dataloader...')
-    # Set dataloaders
-    train_dataloader = torch.utils.data.DataLoader(
-        dataset=TripletFaceDataset(
-            root_dir=dataroot,
-            csv_name=dataset_csv,
-            num_triplets=num_triplets_train,
-            training_triplets_path=training_triplets_path,
-            transform=data_transforms
-        ),
+    # Load the dataset
+    dataset = torchvision.datasets.ImageFolder(
+        root=dataroot,
+        transform=data_transforms
+    )
+
+    # Subset the dataset into training and validation datasets
+    num_classes = len(dataset.classes)
+    print("\nNumber of classes in dataset: {}".format(num_classes))
+    num_validation = int(num_classes * validation_dataset_split_ratio)
+    num_train = num_classes - num_validation
+    indices = list(range(num_classes))
+    np.random.seed(420)
+    np.random.shuffle(indices)
+    train_indices = indices[:num_train]
+    validation_indices = indices[num_train:]
+
+    #train_dataset = Subset(dataset=dataset, indices=train_indices)
+    #validation_dataset = Subset(dataset=dataset, indices=validation_indices)
+
+    #print("Number of classes in training dataset: {}".format(len(train_dataset)))
+    #print("Number of classes in validation dataset: {}".format(len(validation_dataset)))
+
+    # Define the dataloaders
+    train_dataloader = DataLoader(
+        dataset=dataset,
         batch_size=batch_size,
         num_workers=num_workers,
         shuffle=False
     )
+    """
+    validation_dataloader = DataLoader(
+        dataset=validation_dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        shuffle=False
+    )
+    """
 
     logging.info('prepare APD dataset')
     apd_dataroot = '../APD'
@@ -163,43 +180,45 @@ def main():
     )
     print('apdDataset', apdDataset)
 
-    logging.info('prepare apd loader')
     apd_dataloader = torch.utils.data.DataLoader(
         dataset=apdDataset,
         batch_size=apd_batch_size,
         num_workers=num_workers,
-        shuffle=True
+        shuffle=False
     )
-    print('apd_dataloader', apd_dataloader)
-    
-    logging.info('prepare model')
+
     # Instantiate model
     if model_architecture == "resnet18":
-        model = Resnet18Triplet(
+        model = Resnet18Center(
+            num_classes=num_classes,
             embedding_dimension=embedding_dimension,
             pretrained=pretrained
         )
     elif model_architecture == "resnet34":
-        model = Resnet34Triplet(
+        model = Resnet34Center(
+            num_classes=num_classes,
             embedding_dimension=embedding_dimension,
             pretrained=pretrained
         )
     elif model_architecture == "resnet50":
-        model = Resnet50Triplet(
+        model = Resnet50Center(
+            num_classes=num_classes,
             embedding_dimension=embedding_dimension,
             pretrained=pretrained
         )
     elif model_architecture == "resnet101":
-        model = Resnet101Triplet(
+        model = Resnet101Center(
+            num_classes=num_classes,
             embedding_dimension=embedding_dimension,
             pretrained=pretrained
         )
     elif model_architecture == "inceptionresnetv2":
-        model = InceptionResnetV2Triplet(
+        model = InceptionResnetV2Center(
+            num_classes=num_classes,
             embedding_dimension=embedding_dimension,
             pretrained=pretrained
         )
-    print("Using {} model architecture.".format(model_architecture))
+    print("\nUsing {} model architecture.".format(model_architecture))
 
     # Load model to GPU or multiple GPUs if available
     flag_train_gpu = torch.cuda.is_available()
@@ -214,20 +233,34 @@ def main():
         model.cuda()
         print('Using single-gpu training.')
 
-    logging.info('set optimizer')
+    # Set loss functions
+    criterion_crossentropy = nn.CrossEntropyLoss().cuda()
+    criterion_centerloss = CenterLoss(num_classes=num_classes, feat_dim=embedding_dimension).cuda()
+
     # Set optimizers
     if optimizer == "sgd":
         optimizer_model = torch.optim.SGD(model.parameters(), lr=learning_rate)
-        
+        optimizer_centerloss = torch.optim.SGD(criterion_centerloss.parameters(), lr=learning_rate_center_loss)
+
     elif optimizer == "adagrad":
         optimizer_model = torch.optim.Adagrad(model.parameters(), lr=learning_rate)
-        
+        optimizer_centerloss = torch.optim.Adagrad(criterion_centerloss.parameters(), lr=learning_rate_center_loss)
+
     elif optimizer == "rmsprop":
         optimizer_model = torch.optim.RMSprop(model.parameters(), lr=learning_rate)
-        
+        optimizer_centerloss = torch.optim.RMSprop(criterion_centerloss.parameters(), lr=learning_rate_center_loss)
+
     elif optimizer == "adam":
         optimizer_model = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    
+        optimizer_centerloss = torch.optim.Adam(criterion_centerloss.parameters(), lr=learning_rate_center_loss)
+
+    # Set learning rate decay scheduler
+    learning_rate_scheduler = optim.lr_scheduler.MultiStepLR(
+        optimizer=optimizer_model,
+        milestones=[150, 225],
+        gamma=0.1
+    )
+
     # Optionally resume from a checkpoint
     if resume_path:
 
@@ -244,6 +277,8 @@ def main():
                 model.load_state_dict(checkpoint['model_state_dict'])
 
             optimizer_model.load_state_dict(checkpoint['optimizer_model_state_dict'])
+            optimizer_centerloss.load_state_dict(checkpoint['optimizer_centerloss_state_dict'])
+            learning_rate_scheduler.load_state_dict(checkpoint['learning_rate_scheduler_state_dict'])
 
             print("\nCheckpoint loaded: start epoch from checkpoint = {}\nRunning for {} epochs.\n".format(
                     start_epoch,
@@ -254,151 +289,151 @@ def main():
             print("WARNING: No checkpoint found at {}!\nTraining from scratch.".format(resume_path))
 
     # Start Training loop
-    print("\nTraining using triplet loss on {} triplets starting for {} epochs:\n".format(
-            num_triplets_train,
-            epochs-start_epoch
-        )
-    )
+    print("\nTraining using cross entropy loss with center loss starting for {} epochs:\n".format(epochs-start_epoch))
 
     total_time_start = time.time()
     start_epoch = start_epoch
     end_epoch = start_epoch + epochs
-    l2_distance = PairwiseDistance(2).cuda()
 
     BATCH_NUM = len(train_dataloader.dataset) / batch_size
+    APD_BATCH_NUM = len(apd_dataloader.dataset) / apd_batch_size
+
     for epoch in range(start_epoch, end_epoch):
         epoch_time_start = time.time()
 
         #flag_validate_apd = (epoch + 1) % lfw_validation_epoch_interval == 0 or (epoch + 1) % epochs == 0
         flag_validate_apd = True
+        train_loss_sum = 0
+        validation_loss_sum = 0
 
-        triplet_loss_sum = 0
-        num_valid_training_triplets = 0
-
-        # Training pass
+        # Training the model
         model.train()
+        learning_rate_scheduler.step()
         #progress_bar = enumerate(tqdm(train_dataloader))
         progress_bar = enumerate(train_dataloader)
-
-        for batch_idx, (batch_sample) in progress_bar:
+        
+        for batch_index, (data, labels) in progress_bar:
             #break
-            logging.info("epoch:{}/{} batch_idx:{}/{}".format(epoch, end_epoch, batch_idx, BATCH_NUM))
-            #print('batch_idx',batch_idx)
+            logging.info("epoch:{}/{} batch_idx:{}/{}".format(epoch, end_epoch, batch_index, BATCH_NUM))
 
-            anc_img = batch_sample['anc_img'].cuda()
-            pos_img = batch_sample['pos_img'].cuda()
-            neg_img = batch_sample['neg_img'].cuda()
+            data, labels = data.cuda(), labels.cuda()
+            print(data.shape)
+            #print('label', labels)
 
-            # Forward pass - compute embeddings
-            anc_embedding, pos_embedding, neg_embedding = model(anc_img), model(pos_img), model(neg_img)
+            # Forward pass
+            if flag_train_multi_gpu:
+                embedding, logits = model.module.forward_training(data)
+            else:
+                embedding, logits = model.forward_training(data)
 
-            # Forward pass - choose hard negatives only for training
-            pos_dist = l2_distance.forward(anc_embedding, pos_embedding)
-            neg_dist = l2_distance.forward(anc_embedding, neg_embedding)
-
-            all = (neg_dist - pos_dist < margin).cpu().numpy().flatten()
-
-            hard_triplets = np.where(all == 1)
-            if len(hard_triplets[0]) == 0:
-                continue
-
-            anc_hard_embedding = anc_embedding[hard_triplets].cuda()
-            pos_hard_embedding = pos_embedding[hard_triplets].cuda()
-            neg_hard_embedding = neg_embedding[hard_triplets].cuda()
-
-            # Calculate triplet loss
-            triplet_loss = TripletLoss(margin=margin).forward(
-                anchor=anc_hard_embedding,
-                positive=pos_hard_embedding,
-                negative=neg_hard_embedding
-            ).cuda()
-
-            # Calculating loss
-            triplet_loss_sum += triplet_loss.item()
-            num_valid_training_triplets += len(anc_hard_embedding)
+            # Calculate losses
+            cross_entropy_loss = criterion_crossentropy(logits.cuda(), labels.cuda())
+            #center_loss = criterion_centerloss(embedding, labels)
+            #loss = (center_loss * center_loss_weight) + cross_entropy_loss
+            loss = cross_entropy_loss
 
             # Backward pass
+            optimizer_centerloss.zero_grad()
             optimizer_model.zero_grad()
-            triplet_loss.backward()
+            loss.backward()
+            optimizer_centerloss.step()
             optimizer_model.step()
 
-            #if batch_idx == 20:
-            #    break
+            # Remove center_loss_weight impact on the learning of center vectors
+            #for param in criterion_centerloss.parameters():
+            #    param.grad.data *= (1. / center_loss_weight)
 
-        # Model only trains on hard negative triplets
-        avg_triplet_loss = 0 if (num_valid_training_triplets == 0) else triplet_loss_sum / num_valid_training_triplets
+            # Update training loss sum
+            train_loss_sum += loss.item()*data.size(0)
+
+        # Calculate average losses in epoch
+        avg_train_loss = train_loss_sum / len(train_dataloader.dataset)
+        """
+        avg_validation_loss = validation_loss_sum / len(validation_dataloader.dataset)
+        """
+
+        # Calculate training performance statistics in epoch
+        #classification_accuracy = correct * 100. / total
+        #classification_error = 100. - classification_accuracy
+
         epoch_time_end = time.time()
 
-        # Print training statistics and add to log
-        print('Epoch {}:\tAverage Triplet Loss: {:.4f}\tEpoch Time: {:.3f} hours\tNumber of valid training triplets in epoch: {}'.format(
+        # Print training and validation statistics and add to log
+        """
+        print('Epoch {}:\t Average Training Loss: {:.4f}\tAverage Validation Loss: {:.4f}\tClassification Accuracy: {:.2f}%\tClassification Error: {:.2f}%\tEpoch Time: {:.3f} hours'.format(
                 epoch+1,
-                avg_triplet_loss,
-                (epoch_time_end - epoch_time_start)/3600,
-                num_valid_training_triplets
+                avg_train_loss,
+                avg_validation_loss,
+                classification_accuracy,
+                classification_error,
+                (epoch_time_end - epoch_time_start)/3600
             )
         )
-        
-        with open('logs/{}_log_triplet.txt'.format(model_architecture), 'a') as f:
+        """
+        print('Epoch {}:\t Average Training Loss: {:.4f}\t'.format(epoch+1, avg_train_loss))
+
+        with open('logs/{}_log_center.txt'.format(model_architecture), 'a') as f:
             val_list = [
                 epoch+1,
-                avg_triplet_loss,
-                num_valid_training_triplets
+                avg_train_loss
+                #avg_validation_loss,
+                #classification_accuracy.item(),
+                #classification_error.item()
             ]
             log = '\t'.join(str(value) for value in val_list)
             f.writelines(log + '\n')
 
         try:
-            # Plot Triplet losses plot
-            plot_triplet_losses(
-                log_dir="logs/{}_log_triplet.txt".format(model_architecture),
+            # Plot plot for Cross Entropy Loss and Center Loss on training and validation sets
+            plot_training_validation_losses_center(
+                log_dir="logs/{}_log_center.txt".format(model_architecture),
                 epochs=epochs,
-                figure_name="plots/triplet_losses_{}.png".format(model_architecture)
+                figure_name="plots/training_validation_losses_{}_center.png".format(model_architecture)
             )
         except Exception as e:
             print(e)
 
-        # Evaluation pass on LFW dataset
+        # Validating on LFW dataset using KFold based on Euclidean distance metric
         if flag_validate_apd:
 
             model.eval()
             with torch.no_grad():
+                l2_distance = PairwiseDistance(2).cuda()
                 distances, labels = [], []
 
                 print("Validating on APD! ...")
-                progress_bar = enumerate(tqdm(apd_dataloader))
+                #progress_bar = enumerate(tqdm(apd_dataloader))
+                progress_bar = enumerate(apd_dataloader)
+
 
                 for batch_index, (data_a, data_b, label) in progress_bar:
+                    logging.info("epoch:{}/{} batch_idx:{}/{}".format(epoch, end_epoch, batch_index, APD_BATCH_NUM))
                     data_a, data_b, label = data_a.cuda(), data_b.cuda(), label.cuda()
-                    #print('data_a', data_a.shape)
-                    #print('data_b', data_b.shape)
-                    #print('label', label)
 
                     output_a, output_b = model(data_a), model(data_b)
-                    #print('output_a',output_a)
-                    #print('output_b',output_b)
-                    
                     distance = l2_distance.forward(output_a, output_b)  # Euclidean distance
-                    #print('distance',distance)
-                    
+                    #print(distance)
+                    #print(label)
+
                     distances.append(distance.cpu().detach().numpy())
                     labels.append(label.cpu().detach().numpy())
-                    #if batch_index == 20:
-                    #    break
 
                 labels = np.array([sublabel for label in labels for sublabel in label])
                 distances = np.array([subdist for distance in distances for subdist in distance])
-                print('len(labels)', len(labels))
-                print('len(distances)', len(distances))
 
+                myThreshold = 1.414
+                pred = distances<myThreshold
+                numFalse = np.size(pred != labels) - np.count_nonzero(pred != labels)
+                print(numFalse, len(labels))
+                print('loss:', numFalse/len(labels))
                 
                 true_positive_rate, false_positive_rate, precision, recall, accuracy, roc_auc, best_distances, \
                     tar, far = evaluate_lfw(
                         distances=distances,
                         labels=labels
-                    )
-
+                     )
                 # Print statistics and add to log
-                print("Accuracy on APD: {:.4f}+-{:.4f}\tPrecision {:.4f}+-{:.4f}\tRecall {:.4f}+-{:.4f}\tROC Area Under Curve: {:.4f}\tBest distance threshold: {:.2f}+-{:.2f}\tTAR: {:.4f}+-{:.4f} @ FAR: {:.4f}".format(
+                print("Accuracy on LFW: {:.4f}+-{:.4f}\tPrecision {:.4f}+-{:.4f}\tRecall {:.4f}+-{:.4f}\tROC Area Under Curve: {:.4f}\tBest distance threshold: {:.2f}+-{:.2f}\tTAR: {:.4f}+-{:.4f} @ FAR: {:.4f}".format(
                         np.mean(accuracy),
                         np.std(accuracy),
                         np.mean(precision),
@@ -413,21 +448,20 @@ def main():
                         np.mean(far)
                     )
                 )
-
-                with open('logs/lfw_{}_log_triplet.txt'.format(model_architecture), 'a') as f:
+                with open('logs/lfw_{}_log_center.txt'.format(model_architecture), 'a') as f:
                     val_list = [
-                            epoch + 1,
-                            np.mean(accuracy),
-                            np.std(accuracy),
-                            np.mean(precision),
-                            np.std(precision),
-                            np.mean(recall),
-                            np.std(recall),
-                            roc_auc,
-                            np.mean(best_distances),
-                            np.std(best_distances),
-                            np.mean(tar)
-                        ]
+                        epoch + 1,
+                        np.mean(accuracy),
+                        np.std(accuracy),
+                        np.mean(precision),
+                        np.std(precision),
+                        np.mean(recall),
+                        np.std(recall),
+                        roc_auc,
+                        np.mean(best_distances),
+                        np.std(best_distances),
+                        np.mean(tar)
+                    ]
                     log = '\t'.join(str(value) for value in val_list)
                     f.writelines(log + '\n')
 
@@ -436,14 +470,13 @@ def main():
                 plot_roc_lfw(
                     false_positive_rate=false_positive_rate,
                     true_positive_rate=true_positive_rate,
-                    figure_name="plots/roc_plots/roc_{}_epoch_{}_triplet.png".format(model_architecture, epoch+1),
-                    epochNum = epoch
+                    figure_name="plots/roc_plots/roc_{}_epoch_{}_center.png".format(model_architecture, epoch+1)
                 )
                 # Plot LFW accuracies plot
                 plot_accuracy_lfw(
-                    log_dir="logs/lfw_{}_log_triplet.txt".format(model_architecture),
+                    log_dir="logs/lfw_{}_log_center.txt".format(model_architecture),
                     epochs=epochs,
-                    figure_name="plots/apd_accuracies_{}_triplet.png".format(model_architecture)
+                    figure_name="plots/lfw_accuracies_{}_center.png".format(model_architecture)
                 )
             except Exception as e:
                 print(e)
@@ -451,11 +484,14 @@ def main():
         # Save model checkpoint
         state = {
             'epoch': epoch+1,
+            'num_classes': num_classes,
             'embedding_dimension': embedding_dimension,
             'batch_size_training': batch_size,
             'model_state_dict': model.state_dict(),
             'model_architecture': model_architecture,
-            'optimizer_model_state_dict': optimizer_model.state_dict()
+            'optimizer_model_state_dict': optimizer_model.state_dict(),
+            'optimizer_centerloss_state_dict': optimizer_centerloss.state_dict(),
+            'learning_rate_scheduler_state_dict': learning_rate_scheduler.state_dict()
         }
 
         # For storing data parallel model's state dictionary without 'module' parameter
@@ -467,7 +503,7 @@ def main():
             state['best_distance_threshold'] = np.mean(best_distances)
 
         # Save model checkpoint
-        torch.save(state, 'Model_training_checkpoints/model_{}_triplet_epoch_{}.pt'.format(model_architecture, epoch+1))
+        torch.save(state, 'Model_training_checkpoints/model_{}_center_epoch_{}.pt'.format(model_architecture, epoch+1))
 
     # Training loop end
     total_time_end = time.time()

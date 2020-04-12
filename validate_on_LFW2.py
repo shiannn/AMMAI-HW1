@@ -58,54 +58,56 @@ def evaluate_lfw(distances, labels, num_folds=5, far_target=1e-3):
         )
 
     roc_auc = auc(false_positive_rate, true_positive_rate)
-    print('roc_auc', roc_auc)
-    #exit(0)
 
     # Calculate validation rate
-    #thresholds_val = np.arange(min(distances)-2, max(distances)+2, 0.001)
-    #tar, far = calculate_val(
-    #    thresholds_val=thresholds_val, distances=distances, labels=labels, far_target=far_target, num_folds=num_folds
-    #)
+    thresholds_val = np.arange(min(distances)-2, max(distances)+2, 0.001)
+    tar, far = calculate_val(
+        thresholds_val=thresholds_val, distances=distances, labels=labels, far_target=far_target, num_folds=num_folds
+    )
 
     return true_positive_rate, false_positive_rate, precision, recall, accuracy, roc_auc, best_distances,\
-        0, 0
+        tar, far
 
 
 def calculate_roc_values(thresholds, distances, labels, num_folds=10):
     num_pairs = min(len(labels), len(distances))
     num_thresholds = len(thresholds)
-    #k_fold = KFold(n_splits=num_folds, shuffle=False)
+    k_fold = KFold(n_splits=num_folds, shuffle=False)
 
-    true_positive_rates = np.zeros(num_thresholds)
-    false_positive_rates = np.zeros(num_thresholds)
-    #precision = np.zeros(num_folds)
-    #recall = np.zeros(num_folds)
-    #accuracy = np.zeros(num_folds)
-    #best_distances = np.zeros(num_folds)
+    true_positive_rates = np.zeros((num_folds, num_thresholds))
+    false_positive_rates = np.zeros((num_folds, num_thresholds))
+    precision = np.zeros(num_folds)
+    recall = np.zeros(num_folds)
+    accuracy = np.zeros(num_folds)
+    best_distances = np.zeros(num_folds)
 
     indices = np.arange(num_pairs)
 
-    # Find the best distance threshold for the k-fold cross validation using the train set
-    accuracies_trainset = np.zeros(num_thresholds)
-    for threshold_index, threshold in enumerate(thresholds):
-        true_positive_rates[threshold_index], false_positive_rates[threshold_index], _, _, accuracies_trainset[threshold_index] = calculate_metrics(
-            threshold=threshold, dist=distances, actual_issame=labels
-        )
-    best_threshold_index = np.argmax(accuracies_trainset)
-    print('best_threshold_index', best_threshold_index)
-    _, _, precision, recall, accuracy = calculate_metrics(
-        threshold=thresholds[best_threshold_index], dist=distances, actual_issame=labels
-    )
+    for fold_index, (train_set, test_set) in enumerate(k_fold.split(indices)):
+        # Find the best distance threshold for the k-fold cross validation using the train set
+        accuracies_trainset = np.zeros(num_thresholds)
+        for threshold_index, threshold in enumerate(thresholds):
+            _, _, _, _, accuracies_trainset[threshold_index] = calculate_metrics(
+                threshold=threshold, dist=distances[train_set], actual_issame=labels[train_set]
+            )
+        best_threshold_index = np.argmax(accuracies_trainset)
 
-    #true_positive_rate = np.mean(true_positive_rates, 0)
-    #false_positive_rate = np.mean(false_positive_rates, 0)
-    best_distances = thresholds[best_threshold_index]
-    print('accuracies_trainset', accuracies_trainset)
-    print('accuracy', accuracy)
-    print('true_positive_rates', true_positive_rates)
-    print('false_positive_rates', false_positive_rates)
-    
-    return true_positive_rates, false_positive_rates, precision, recall, accuracy, best_distances
+        # Test on test set using the best distance threshold
+        for threshold_index, threshold in enumerate(thresholds):
+            true_positive_rates[fold_index, threshold_index], false_positive_rates[fold_index, threshold_index], _, _,\
+                _ = calculate_metrics(
+                    threshold=threshold, dist=distances[test_set], actual_issame=labels[test_set]
+                )
+
+        _, _, precision[fold_index], recall[fold_index], accuracy[fold_index] = calculate_metrics(
+            threshold=thresholds[best_threshold_index], dist=distances[test_set], actual_issame=labels[test_set]
+        )
+
+        true_positive_rate = np.mean(true_positive_rates, 0)
+        false_positive_rate = np.mean(false_positive_rates, 0)
+        best_distances[fold_index] = thresholds[best_threshold_index]
+
+    return true_positive_rate, false_positive_rate, precision, recall, accuracy, best_distances
 
 
 def calculate_metrics(threshold, dist, actual_issame):
