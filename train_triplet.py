@@ -24,8 +24,8 @@ import shutil
 
 
 logging.basicConfig(filename="training.log", level=logging.INFO)
-shutil.rmtree("plots/roc_plots")
-rocFolder = Path("plots") / Path("roc_plots")
+shutil.rmtree("plots/roc_plots_triplet")
+rocFolder = Path("plots") / Path("roc_plots_triplet")
 rocFolder.mkdir(exist_ok=True)
 
 try:
@@ -436,7 +436,7 @@ def main():
                 plot_roc_lfw(
                     false_positive_rate=false_positive_rate,
                     true_positive_rate=true_positive_rate,
-                    figure_name="plots/roc_plots/roc_{}_epoch_{}_triplet.png".format(model_architecture, epoch+1),
+                    figure_name="plots/roc_plots_triplet/roc_{}_epoch_{}_triplet.png".format(model_architecture, epoch+1),
                     epochNum = epoch
                 )
                 # Plot LFW accuracies plot

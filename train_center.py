@@ -1,6 +1,7 @@
 import numpy as np
 import time
 import argparse
+import logging
 import os
 import torch
 import torch.nn as nn
@@ -10,7 +11,7 @@ import torchvision.transforms as transforms
 from torch.nn.modules.distance import PairwiseDistance
 from torch.utils.data import DataLoader, Subset
 from losses.center_loss import CenterLoss
-from dataloaders.LFWDataset import LFWDataset
+from dataloaders.APDDataset import APDDataset
 from validate_on_LFW import evaluate_lfw
 from plots import plot_roc_lfw, plot_accuracy_lfw, plot_training_validation_losses_center
 from tqdm import tqdm
@@ -19,7 +20,23 @@ from models.resnet34 import Resnet34Center
 from models.resnet50 import Resnet50Center
 from models.resnet101 import Resnet101Center
 from models.inceptionresnetv2 import InceptionResnetV2Center
+from PIL import ImageFile
+from pathlib import Path
+import shutil
 
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+logging.basicConfig(level=logging.INFO)
+shutil.rmtree("plots/roc_plots_center")
+rocFolder = Path("plots") / Path("roc_plots_center")
+rocFolder.mkdir(exist_ok=True)
+
+try:
+    os.remove("plots/training_validation_losses_resnet34_center.png")
+    os.remove("logs/resnet34_log_center.txt")
+except OSError:
+    pass
 
 parser = argparse.ArgumentParser(description="Training FaceNet facial recognition model using Cross Entropy Loss with Center Loss.")
 # Dataset
@@ -27,20 +44,20 @@ parser.add_argument('--dataroot', '-d', type=str, required=True,
                     help="(REQUIRED) Absolute path to the dataset folder"
                     )
 # LFW
-parser.add_argument('--lfw', type=str, required=True,
+parser.add_argument('--apd', type=str, required=True,
                     help="(REQUIRED) Absolute path to the labeled faces in the wild dataset folder"
                     )
-parser.add_argument('--lfw_batch_size', default=64, type=int,
-                    help="Batch size for LFW dataset (default: 64)"
+parser.add_argument('--apd_batch_size', default=32, type=int,
+                    help="Batch size for APD dataset (default: 64)"
                     )
-parser.add_argument('--lfw_validation_epoch_interval', default=5, type=int,
-                    help="Perform LFW validation every n epoch interval (default: every 5 epochs)"
+parser.add_argument('--apd_validation_epoch_interval', default=5, type=int,
+                    help="Perform APD validation every n epoch interval (default: every 5 epochs)"
                     )
 # Training settings
 parser.add_argument('--model', type=str, default="resnet34", choices=["resnet18", "resnet34", "resnet50", "resnet101", "inceptionresnetv2"],
     help="The required model architecture for training: ('resnet18','resnet34', 'resnet50', 'resnet101', 'inceptionresnetv2'), (default: 'resnet34')"
                     )
-parser.add_argument('--epochs', default=275, type=int,
+parser.add_argument('--epochs', default=20, type=int,
                     help="Required training epochs (default: 275)"
                     )
 parser.add_argument('--resume_path', default='',  type=str,
@@ -78,9 +95,9 @@ args = parser.parse_args()
 
 def main():
     dataroot = args.dataroot
-    lfw_dataroot = args.lfw
-    lfw_batch_size = args.lfw_batch_size
-    lfw_validation_epoch_interval = args.lfw_validation_epoch_interval
+    apd_dataroot = args.apd
+    apd_batch_size = args.apd_batch_size
+    apd_validation_epoch_interval = args.apd_validation_epoch_interval
     model_architecture = args.model
     epochs = args.epochs
     resume_path = args.resume_path
@@ -101,7 +118,8 @@ def main():
 
     #  Size 182x182 RGB image -> Center crop size 160x160 RGB image for more model generalization
     data_transforms = transforms.Compose([
-        transforms.RandomCrop(size=160),
+        #transforms.RandomCrop(size=50),
+        transforms.Resize(size=(160,160)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize(
@@ -110,7 +128,7 @@ def main():
         )
     ])
     # Size 160x160 RGB image
-    lfw_transforms = transforms.Compose([
+    apd_transforms = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(
             mean=[0.5, 0.5, 0.5],
@@ -135,36 +153,44 @@ def main():
     train_indices = indices[:num_train]
     validation_indices = indices[num_train:]
 
-    train_dataset = Subset(dataset=dataset, indices=train_indices)
-    validation_dataset = Subset(dataset=dataset, indices=validation_indices)
+    #train_dataset = Subset(dataset=dataset, indices=train_indices)
+    #validation_dataset = Subset(dataset=dataset, indices=validation_indices)
 
-    print("Number of classes in training dataset: {}".format(len(train_dataset)))
-    print("Number of classes in validation dataset: {}".format(len(validation_dataset)))
+    #print("Number of classes in training dataset: {}".format(len(train_dataset)))
+    #print("Number of classes in validation dataset: {}".format(len(validation_dataset)))
 
     # Define the dataloaders
     train_dataloader = DataLoader(
-        dataset=train_dataset,
+        dataset=dataset,
         batch_size=batch_size,
         num_workers=num_workers,
-        shuffle=False
+        shuffle=True
     )
-
+    """
     validation_dataloader = DataLoader(
         dataset=validation_dataset,
         batch_size=batch_size,
         num_workers=num_workers,
         shuffle=False
     )
+    """
 
-    lfw_dataloader = torch.utils.data.DataLoader(
-        dataset=LFWDataset(
-            dir=lfw_dataroot,
-            pairs_path='datasets/LFW_pairs.txt',
-            transform=lfw_transforms
-        ),
-        batch_size=lfw_batch_size,
+    logging.info('prepare APD dataset')
+    apd_dataroot = '../APD'
+    apdDataset=APDDataset(
+        directory=apd_dataroot,
+        #pairs_path='negative_pairs.txt',
+        #pairs_path='positive_pairs.txt',
+        pairs_path='full.txt',
+        transform=apd_transforms
+    )
+    print('apdDataset', apdDataset)
+
+    apd_dataloader = torch.utils.data.DataLoader(
+        dataset=apdDataset,
+        batch_size=apd_batch_size,
         num_workers=num_workers,
-        shuffle=False
+        shuffle=True
     )
 
     # Instantiate model
@@ -275,20 +301,30 @@ def main():
     start_epoch = start_epoch
     end_epoch = start_epoch + epochs
 
+    BATCH_NUM = len(train_dataloader.dataset) / batch_size
+    APD_BATCH_NUM = len(apd_dataloader.dataset) / apd_batch_size
+
     for epoch in range(start_epoch, end_epoch):
         epoch_time_start = time.time()
 
-        flag_validate_lfw = (epoch + 1) % lfw_validation_epoch_interval == 0 or (epoch + 1) % epochs == 0
+        #flag_validate_apd = (epoch + 1) % lfw_validation_epoch_interval == 0 or (epoch + 1) % epochs == 0
+        flag_validate_apd = True
         train_loss_sum = 0
         validation_loss_sum = 0
 
         # Training the model
         model.train()
         learning_rate_scheduler.step()
-        progress_bar = enumerate(tqdm(train_dataloader))
-
+        #progress_bar = enumerate(tqdm(train_dataloader))
+        progress_bar = enumerate(train_dataloader)
+        
         for batch_index, (data, labels) in progress_bar:
+            #break
+            
+
             data, labels = data.cuda(), labels.cuda()
+            print(data.shape)
+            #print('label', labels)
 
             # Forward pass
             if flag_train_multi_gpu:
@@ -300,6 +336,8 @@ def main():
             cross_entropy_loss = criterion_crossentropy(logits.cuda(), labels.cuda())
             center_loss = criterion_centerloss(embedding, labels)
             loss = (center_loss * center_loss_weight) + cross_entropy_loss
+            #loss = cross_entropy_loss
+            logging.info("epoch:{}/{} batch_idx:{}/{} loss:{}".format(epoch, end_epoch, batch_index, BATCH_NUM, loss))
 
             # Backward pass
             optimizer_centerloss.zero_grad()
@@ -309,70 +347,33 @@ def main():
             optimizer_model.step()
 
             # Remove center_loss_weight impact on the learning of center vectors
-            for param in criterion_centerloss.parameters():
-                param.grad.data *= (1. / center_loss_weight)
+            #for param in criterion_centerloss.parameters():
+            #    param.grad.data *= (1. / center_loss_weight)
 
             # Update training loss sum
             train_loss_sum += loss.item()*data.size(0)
 
-        # Validating the model
-        model.eval()
-        correct, total = 0, 0
-
-        with torch.no_grad():
-
-            progress_bar = enumerate(tqdm(validation_dataloader))
-
-            for batch_index, (data, labels) in progress_bar:
-
-                data, labels = data.cuda(), labels.cuda()
-
-                # Forward pass
-                if flag_train_multi_gpu:
-                    embedding, logits = model.module.forward_training(data)
-                else:
-                    embedding, logits = model.forward_training(data)
-
-                # Calculate losses
-                cross_entropy_loss = criterion_crossentropy(logits.cuda(), labels.cuda())
-                center_loss = criterion_centerloss(embedding, labels)
-                loss = (center_loss * center_loss_weight) + cross_entropy_loss
-
-                # Update average validation loss
-                validation_loss_sum += loss.item() * data.size(0)
-
-                # Calculate training performance metrics
-                predictions = logits.data.max(1)[1]
-                total += labels.size(0)
-                correct += (predictions == labels.data).sum()
-
         # Calculate average losses in epoch
         avg_train_loss = train_loss_sum / len(train_dataloader.dataset)
+        """
         avg_validation_loss = validation_loss_sum / len(validation_dataloader.dataset)
+        """
 
         # Calculate training performance statistics in epoch
-        classification_accuracy = correct * 100. / total
-        classification_error = 100. - classification_accuracy
+        #classification_accuracy = correct * 100. / total
+        #classification_error = 100. - classification_accuracy
 
         epoch_time_end = time.time()
 
-        # Print training and validation statistics and add to log
-        print('Epoch {}:\t Average Training Loss: {:.4f}\tAverage Validation Loss: {:.4f}\tClassification Accuracy: {:.2f}%\tClassification Error: {:.2f}%\tEpoch Time: {:.3f} hours'.format(
-                epoch+1,
-                avg_train_loss,
-                avg_validation_loss,
-                classification_accuracy,
-                classification_error,
-                (epoch_time_end - epoch_time_start)/3600
-            )
-        )
+        print('Epoch {}:\t Average Training Loss: {:.4f}\t'.format(epoch+1, avg_train_loss))
+
         with open('logs/{}_log_center.txt'.format(model_architecture), 'a') as f:
             val_list = [
                 epoch+1,
-                avg_train_loss,
-                avg_validation_loss,
-                classification_accuracy.item(),
-                classification_error.item()
+                avg_train_loss
+                #avg_validation_loss,
+                #classification_accuracy.item(),
+                #classification_error.item()
             ]
             log = '\t'.join(str(value) for value in val_list)
             f.writelines(log + '\n')
@@ -388,34 +389,38 @@ def main():
             print(e)
 
         # Validating on LFW dataset using KFold based on Euclidean distance metric
-        if flag_validate_lfw:
+        if flag_validate_apd:
 
             model.eval()
             with torch.no_grad():
                 l2_distance = PairwiseDistance(2).cuda()
                 distances, labels = [], []
 
-                print("Validating on LFW! ...")
-                progress_bar = enumerate(tqdm(lfw_dataloader))
+                print("Validating on APD! ...")
+                #progress_bar = enumerate(tqdm(apd_dataloader))
+                progress_bar = enumerate(apd_dataloader)
+
 
                 for batch_index, (data_a, data_b, label) in progress_bar:
+                    logging.info("epoch:{}/{} batch_idx:{}/{}".format(epoch, end_epoch, batch_index, APD_BATCH_NUM))
                     data_a, data_b, label = data_a.cuda(), data_b.cuda(), label.cuda()
 
                     output_a, output_b = model(data_a), model(data_b)
                     distance = l2_distance.forward(output_a, output_b)  # Euclidean distance
+                    #print(distance)
+                    #print(label)
 
                     distances.append(distance.cpu().detach().numpy())
                     labels.append(label.cpu().detach().numpy())
 
                 labels = np.array([sublabel for label in labels for sublabel in label])
                 distances = np.array([subdist for distance in distances for subdist in distance])
-
+                
                 true_positive_rate, false_positive_rate, precision, recall, accuracy, roc_auc, best_distances, \
                     tar, far = evaluate_lfw(
                         distances=distances,
                         labels=labels
                      )
-
                 # Print statistics and add to log
                 print("Accuracy on LFW: {:.4f}+-{:.4f}\tPrecision {:.4f}+-{:.4f}\tRecall {:.4f}+-{:.4f}\tROC Area Under Curve: {:.4f}\tBest distance threshold: {:.2f}+-{:.2f}\tTAR: {:.4f}+-{:.4f} @ FAR: {:.4f}".format(
                         np.mean(accuracy),
@@ -454,7 +459,8 @@ def main():
                 plot_roc_lfw(
                     false_positive_rate=false_positive_rate,
                     true_positive_rate=true_positive_rate,
-                    figure_name="plots/roc_plots/roc_{}_epoch_{}_center.png".format(model_architecture, epoch+1)
+                    figure_name="plots/roc_plots_center/roc_{}_epoch_{}_center.png".format(model_architecture, epoch+1),
+                    epochNum = epoch
                 )
                 # Plot LFW accuracies plot
                 plot_accuracy_lfw(
@@ -483,11 +489,11 @@ def main():
             state['model_state_dict'] = model.module.state_dict()
 
         # For storing best euclidean distance threshold during LFW validation
-        if flag_validate_lfw:
+        if flag_validate_apd:
             state['best_distance_threshold'] = np.mean(best_distances)
 
         # Save model checkpoint
-        torch.save(state, 'Model_training_checkpoints/model_{}_center_epoch_{}.pt'.format(model_architecture, epoch+1))
+        torch.save(state, 'center_checkpoints/model_{}_center_epoch_{}.pt'.format(model_architecture, epoch+1))
 
     # Training loop end
     total_time_end = time.time()

@@ -51,7 +51,7 @@ def evaluate_lfw(distances, labels, num_folds=5, far_target=1e-3):
     print('distances',distances)
     print('labels',labels)
     # Calculate ROC metrics
-    thresholds_roc = np.arange(min(distances)-2, max(distances)+2, 0.01)
+    thresholds_roc = np.arange(min(distances)-1, max(distances)+1, 0.01)
     true_positive_rate, false_positive_rate, precision, recall, accuracy, best_distances = \
         calculate_roc_values(
             thresholds=thresholds_roc, distances=distances, labels=labels, num_folds=num_folds

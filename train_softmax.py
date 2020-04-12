@@ -21,14 +21,20 @@ from models.resnet50 import Resnet50Center
 from models.resnet101 import Resnet101Center
 from models.inceptionresnetv2 import InceptionResnetV2Center
 from PIL import ImageFile
+from pathlib import Path
+import shutil
 
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 logging.basicConfig(level=logging.INFO)
+shutil.rmtree("plots/roc_plots_softmax")
+rocFolder = Path("plots") / Path("roc_plots_softmax")
+rocFolder.mkdir(exist_ok=True)
+
 try:
-    os.remove("plots/training_validation_losses_resnet34_center.png")
-    os.remove("logs/resnet34_log_center.txt")
+    os.remove("plots/training_validation_losses_resnet34_softmax.png")
+    os.remove("logs/resnet34_log_softmax.txt")
 except OSError:
     pass
 
@@ -66,7 +72,7 @@ parser.add_argument('--num_workers', default=4, type=int,
 parser.add_argument('--valid_split', default=0.01, type=float,
                     help="Validation dataset percentage to be used from the dataset (default: 0.01)"
                     )
-parser.add_argument('--embedding_dim', default=128, type=int,
+parser.add_argument('--embedding_dim', default=200, type=int,
                     help="Dimension of the embedding vector (default: 128)"
                     )
 parser.add_argument('--pretrained', default=False, type=bool,
@@ -158,7 +164,7 @@ def main():
         dataset=dataset,
         batch_size=batch_size,
         num_workers=num_workers,
-        shuffle=False
+        shuffle=True
     )
     """
     validation_dataloader = DataLoader(
@@ -184,7 +190,7 @@ def main():
         dataset=apdDataset,
         batch_size=apd_batch_size,
         num_workers=num_workers,
-        shuffle=False
+        shuffle=True
     )
 
     # Instantiate model
@@ -314,7 +320,7 @@ def main():
         
         for batch_index, (data, labels) in progress_bar:
             #break
-            logging.info("epoch:{}/{} batch_idx:{}/{}".format(epoch, end_epoch, batch_index, BATCH_NUM))
+            
 
             data, labels = data.cuda(), labels.cuda()
             print(data.shape)
@@ -331,6 +337,7 @@ def main():
             #center_loss = criterion_centerloss(embedding, labels)
             #loss = (center_loss * center_loss_weight) + cross_entropy_loss
             loss = cross_entropy_loss
+            logging.info("epoch:{}/{} batch_idx:{}/{} loss:{}".format(epoch, end_epoch, batch_index, BATCH_NUM, loss))
 
             # Backward pass
             optimizer_centerloss.zero_grad()
@@ -358,21 +365,9 @@ def main():
 
         epoch_time_end = time.time()
 
-        # Print training and validation statistics and add to log
-        """
-        print('Epoch {}:\t Average Training Loss: {:.4f}\tAverage Validation Loss: {:.4f}\tClassification Accuracy: {:.2f}%\tClassification Error: {:.2f}%\tEpoch Time: {:.3f} hours'.format(
-                epoch+1,
-                avg_train_loss,
-                avg_validation_loss,
-                classification_accuracy,
-                classification_error,
-                (epoch_time_end - epoch_time_start)/3600
-            )
-        )
-        """
         print('Epoch {}:\t Average Training Loss: {:.4f}\t'.format(epoch+1, avg_train_loss))
 
-        with open('logs/{}_log_center.txt'.format(model_architecture), 'a') as f:
+        with open('logs/{}_log_softmax.txt'.format(model_architecture), 'a') as f:
             val_list = [
                 epoch+1,
                 avg_train_loss
@@ -386,9 +381,9 @@ def main():
         try:
             # Plot plot for Cross Entropy Loss and Center Loss on training and validation sets
             plot_training_validation_losses_center(
-                log_dir="logs/{}_log_center.txt".format(model_architecture),
+                log_dir="logs/{}_log_softmax.txt".format(model_architecture),
                 epochs=epochs,
-                figure_name="plots/training_validation_losses_{}_center.png".format(model_architecture)
+                figure_name="plots/training_validation_losses_{}_softmax.png".format(model_architecture)
             )
         except Exception as e:
             print(e)
@@ -420,12 +415,6 @@ def main():
 
                 labels = np.array([sublabel for label in labels for sublabel in label])
                 distances = np.array([subdist for distance in distances for subdist in distance])
-
-                myThreshold = 1.414
-                pred = distances<myThreshold
-                numFalse = np.size(pred != labels) - np.count_nonzero(pred != labels)
-                print(numFalse, len(labels))
-                print('loss:', numFalse/len(labels))
                 
                 true_positive_rate, false_positive_rate, precision, recall, accuracy, roc_auc, best_distances, \
                     tar, far = evaluate_lfw(
@@ -448,7 +437,7 @@ def main():
                         np.mean(far)
                     )
                 )
-                with open('logs/lfw_{}_log_center.txt'.format(model_architecture), 'a') as f:
+                with open('logs/lfw_{}_log_softmax.txt'.format(model_architecture), 'a') as f:
                     val_list = [
                         epoch + 1,
                         np.mean(accuracy),
@@ -470,13 +459,14 @@ def main():
                 plot_roc_lfw(
                     false_positive_rate=false_positive_rate,
                     true_positive_rate=true_positive_rate,
-                    figure_name="plots/roc_plots/roc_{}_epoch_{}_center.png".format(model_architecture, epoch+1)
+                    figure_name="plots/roc_plots_softmax/roc_{}_epoch_{}_softmax.png".format(model_architecture, epoch+1),
+                    epochNum = epoch
                 )
                 # Plot LFW accuracies plot
                 plot_accuracy_lfw(
-                    log_dir="logs/lfw_{}_log_center.txt".format(model_architecture),
+                    log_dir="logs/lfw_{}_log_softmax.txt".format(model_architecture),
                     epochs=epochs,
-                    figure_name="plots/lfw_accuracies_{}_center.png".format(model_architecture)
+                    figure_name="plots/lfw_accuracies_{}_softmax.png".format(model_architecture)
                 )
             except Exception as e:
                 print(e)
@@ -503,7 +493,7 @@ def main():
             state['best_distance_threshold'] = np.mean(best_distances)
 
         # Save model checkpoint
-        torch.save(state, 'Model_training_checkpoints/model_{}_center_epoch_{}.pt'.format(model_architecture, epoch+1))
+        torch.save(state, 'softmax_checkpoints/model_{}_softmax_epoch_{}.pt'.format(model_architecture, epoch+1))
 
     # Training loop end
     total_time_end = time.time()
