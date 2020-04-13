@@ -1,4 +1,5 @@
 import numpy as np
+import math
 import time
 import argparse
 import logging
@@ -8,11 +9,12 @@ import torch.nn as nn
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
+from torch.nn import CosineSimilarity
 from torch.nn.modules.distance import PairwiseDistance
 from torch.utils.data import DataLoader, Subset
 from losses.center_loss import CenterLoss
 from dataloaders.APDDataset import APDDataset
-from validate_on_LFW import evaluate_lfw
+from validate_on_LFW_m import evaluate_lfw
 from plots import plot_roc_lfw, plot_accuracy_lfw, plot_training_validation_losses_center
 from tqdm import tqdm
 from models.resnet18 import Resnet18Center
@@ -20,6 +22,7 @@ from models.resnet34 import Resnet34Center
 from models.resnet50 import Resnet50Center
 from models.resnet101 import Resnet101Center
 from models.inceptionresnetv2 import InceptionResnetV2Center
+from ArcMarginModel import ArcMarginModel
 from PIL import ImageFile
 from pathlib import Path
 import shutil
@@ -28,13 +31,13 @@ import shutil
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 logging.basicConfig(level=logging.INFO)
-shutil.rmtree("plots/roc_plots_softmax")
-rocFolder = Path("plots") / Path("roc_plots_softmax")
+shutil.rmtree("plots/roc_plots_margin")
+rocFolder = Path("plots") / Path("roc_plots_margin")
 rocFolder.mkdir(exist_ok=True)
 
 try:
-    os.remove("plots/training_validation_losses_resnet34_softmax.png")
-    os.remove("logs/resnet34_log_softmax.txt")
+    os.remove("plots/training_validation_losses_resnet34_margin.png")
+    os.remove("logs/resnet34_log_margin.txt")
 except OSError:
     pass
 
@@ -153,12 +156,6 @@ def main():
     train_indices = indices[:num_train]
     validation_indices = indices[num_train:]
 
-    #train_dataset = Subset(dataset=dataset, indices=train_indices)
-    #validation_dataset = Subset(dataset=dataset, indices=validation_indices)
-
-    #print("Number of classes in training dataset: {}".format(len(train_dataset)))
-    #print("Number of classes in validation dataset: {}".format(len(validation_dataset)))
-
     # Define the dataloaders
     train_dataloader = DataLoader(
         dataset=dataset,
@@ -166,14 +163,6 @@ def main():
         num_workers=num_workers,
         shuffle=True
     )
-    """
-    validation_dataloader = DataLoader(
-        dataset=validation_dataset,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        shuffle=False
-    )
-    """
 
     logging.info('prepare APD dataset')
     apd_dataroot = '../APD'
@@ -243,22 +232,24 @@ def main():
     criterion_crossentropy = nn.CrossEntropyLoss().cuda()
     criterion_centerloss = CenterLoss(num_classes=num_classes, feat_dim=embedding_dimension).cuda()
 
+    metric_fc = ArcMarginModel(num_classes, embedding_dimension).cuda()
+
     # Set optimizers
     if optimizer == "sgd":
-        optimizer_model = torch.optim.SGD(model.parameters(), lr=learning_rate)
-        #optimizer_centerloss = torch.optim.SGD(criterion_centerloss.parameters(), lr=learning_rate_center_loss)
+        optimizer_model = torch.optim.SGD([{'params':model.parameters()}, {'params':metric_fc.parameters()}], lr=learning_rate)
+        #optimizer_metric = torch.optim.SGD(metric_fc.parameters(), lr=learning_rate_center_loss)
 
     elif optimizer == "adagrad":
-        optimizer_model = torch.optim.Adagrad(model.parameters(), lr=learning_rate)
-        #optimizer_centerloss = torch.optim.Adagrad(criterion_centerloss.parameters(), lr=learning_rate_center_loss)
+        optimizer_model = torch.optim.Adagrad([{'params':model.parameters()}, {'params':metric_fc.parameters()}], lr=learning_rate)
+        #optimizer_metric = torch.optim.Adagrad(metric_fc.parameters(), lr=learning_rate_center_loss)
 
     elif optimizer == "rmsprop":
-        optimizer_model = torch.optim.RMSprop(model.parameters(), lr=learning_rate)
-        #optimizer_centerloss = torch.optim.RMSprop(criterion_centerloss.parameters(), lr=learning_rate_center_loss)
+        optimizer_model = torch.optim.RMSprop([{'params':model.parameters()}, {'params':metric_fc.parameters()}], lr=learning_rate)
+        #optimizer_metric = torch.optim.RMSprop(metric_fc.parameters(), lr=learning_rate_center_loss)
 
     elif optimizer == "adam":
-        optimizer_model = torch.optim.Adam(model.parameters(), lr=learning_rate)
-        #optimizer_centerloss = torch.optim.Adam(criterion_centerloss.parameters(), lr=learning_rate_center_loss)
+        optimizer_model = torch.optim.Adam([{'params':model.parameters()}, {'params':metric_fc.parameters()}], lr=learning_rate)
+        #optimizer_metric = torch.optim.Adam(metric_fc.parameters(), lr=learning_rate_center_loss)
 
     # Set learning rate decay scheduler
     learning_rate_scheduler = optim.lr_scheduler.MultiStepLR(
@@ -283,7 +274,7 @@ def main():
                 model.load_state_dict(checkpoint['model_state_dict'])
 
             optimizer_model.load_state_dict(checkpoint['optimizer_model_state_dict'])
-            #optimizer_centerloss.load_state_dict(checkpoint['optimizer_centerloss_state_dict'])
+            #optimizer_metric.load_state_dict(checkpoint['optimizer_metric_state_dict'])
             learning_rate_scheduler.load_state_dict(checkpoint['learning_rate_scheduler_state_dict'])
 
             print("\nCheckpoint loaded: start epoch from checkpoint = {}\nRunning for {} epochs.\n".format(
@@ -314,36 +305,41 @@ def main():
 
         # Training the model
         model.train()
+        #metric_fc.train()
         learning_rate_scheduler.step()
         #progress_bar = enumerate(tqdm(train_dataloader))
         progress_bar = enumerate(train_dataloader)
         
         for batch_index, (data, labels) in progress_bar:
-            #break
             
-
             data, labels = data.cuda(), labels.cuda()
             print(data.shape)
             #print('label', labels)
 
             # Forward pass
-            if flag_train_multi_gpu:
-                embedding, logits = model.module.forward_training(data)
-            else:
-                embedding, logits = model.forward_training(data)
+            #if flag_train_multi_gpu:
+            #    embedding, logits = model.module.forward_training(data)
+            #else:
+            #    embedding, logits = model.forward_training(data)
 
+            feature = model(data) ### embedding size 
+            ### use ArcMargin to get output
+            output = metric_fc(feature, labels)
+            ### use CrossEntropy to calculate loss between output and label
             # Calculate losses
-            cross_entropy_loss = criterion_crossentropy(logits.cuda(), labels.cuda())
+            cross_entropy_loss = criterion_crossentropy(output.cuda(), labels.cuda())
+
+
             #center_loss = criterion_centerloss(embedding, labels)
             #loss = (center_loss * center_loss_weight) + cross_entropy_loss
             loss = cross_entropy_loss
             logging.info("epoch:{}/{} batch_idx:{}/{} loss:{}".format(epoch, end_epoch, batch_index, BATCH_NUM, loss))
 
             # Backward pass
-            #optimizer_centerloss.zero_grad()
+            #optimizer_metric.zero_grad()
             optimizer_model.zero_grad()
             loss.backward()
-            #optimizer_centerloss.step()
+            #optimizer_metric.step()
             optimizer_model.step()
 
             # Remove center_loss_weight impact on the learning of center vectors
@@ -352,6 +348,8 @@ def main():
 
             # Update training loss sum
             train_loss_sum += loss.item()*data.size(0)
+            #if batch_index == 20:
+            #    break
 
         # Calculate average losses in epoch
         avg_train_loss = train_loss_sum / len(train_dataloader.dataset)
@@ -367,7 +365,7 @@ def main():
 
         print('Epoch {}:\t Average Training Loss: {:.4f}\t'.format(epoch+1, avg_train_loss))
 
-        with open('logs/{}_log_softmax.txt'.format(model_architecture), 'a') as f:
+        with open('logs/{}_log_margin.txt'.format(model_architecture), 'a') as f:
             val_list = [
                 epoch+1,
                 avg_train_loss
@@ -381,9 +379,9 @@ def main():
         try:
             # Plot plot for Cross Entropy Loss and Center Loss on training and validation sets
             plot_training_validation_losses_center(
-                log_dir="logs/{}_log_softmax.txt".format(model_architecture),
+                log_dir="logs/{}_log_margin.txt".format(model_architecture),
                 epochs=epochs,
-                figure_name="plots/training_validation_losses_{}_softmax.png".format(model_architecture)
+                figure_name="plots/training_validation_losses_{}_margin.png".format(model_architecture)
             )
         except Exception as e:
             print(e)
@@ -406,13 +404,30 @@ def main():
                     data_a, data_b, label = data_a.cuda(), data_b.cuda(), label.cuda()
 
                     output_a, output_b = model(data_a), model(data_b)
-                    distance = l2_distance.forward(output_a, output_b)  # Euclidean distance
+                    ### using cosine similarity
+                    
+                    cos = CosineSimilarity(dim=1)
+                    cosine = cos(output_a, output_b)
+                    #print('cosine', cosine.shape)
+                    #print('cosine',cosine)
+
+                    theta = torch.acos(cosine)
+                    #print('theta', theta)
+                    
+                    distance = theta * 180 / math.pi
+
+                    #print('output_a.shape', output_a.shape,'output_b.shape', output_b.shape)
+                    #distancel2 = l2_distance.forward(output_a, output_b)  # Euclidean distance
+                    #distance = distance.squeeze()
+                    #print(distancel2)
                     #print(distance)
+                    
                     #print(label)
 
                     distances.append(distance.cpu().detach().numpy())
+                    #distances.append(distancel2.cpu().detach().numpy())
                     labels.append(label.cpu().detach().numpy())
-
+                #exit(0)
                 labels = np.array([sublabel for label in labels for sublabel in label])
                 distances = np.array([subdist for distance in distances for subdist in distance])
                 
@@ -437,7 +452,7 @@ def main():
                         np.mean(far)
                     )
                 )
-                with open('logs/lfw_{}_log_softmax.txt'.format(model_architecture), 'a') as f:
+                with open('logs/lfw_{}_log_margin.txt'.format(model_architecture), 'a') as f:
                     val_list = [
                         epoch + 1,
                         np.mean(accuracy),
@@ -459,14 +474,14 @@ def main():
                 plot_roc_lfw(
                     false_positive_rate=false_positive_rate,
                     true_positive_rate=true_positive_rate,
-                    figure_name="plots/roc_plots_softmax/roc_{}_epoch_{}_softmax.png".format(model_architecture, epoch+1),
+                    figure_name="plots/roc_plots_margin/roc_{}_epoch_{}_margin.png".format(model_architecture, epoch+1),
                     epochNum = epoch
                 )
                 # Plot LFW accuracies plot
                 plot_accuracy_lfw(
-                    log_dir="logs/lfw_{}_log_softmax.txt".format(model_architecture),
+                    log_dir="logs/lfw_{}_log_margin.txt".format(model_architecture),
                     epochs=epochs,
-                    figure_name="plots/lfw_accuracies_{}_softmax.png".format(model_architecture)
+                    figure_name="plots/lfw_accuracies_{}_margin.png".format(model_architecture)
                 )
             except Exception as e:
                 print(e)
@@ -480,7 +495,7 @@ def main():
             'model_state_dict': model.state_dict(),
             'model_architecture': model_architecture,
             'optimizer_model_state_dict': optimizer_model.state_dict(),
-            #'optimizer_centerloss_state_dict': optimizer_centerloss.state_dict(),
+            #'optimizer_metric_state_dict': optimizer_metric.state_dict(),
             'learning_rate_scheduler_state_dict': learning_rate_scheduler.state_dict()
         }
 
@@ -493,7 +508,7 @@ def main():
             state['best_distance_threshold'] = np.mean(best_distances)
 
         # Save model checkpoint
-        torch.save(state, 'softmax_checkpoints/model_{}_softmax_epoch_{}.pt'.format(model_architecture, epoch+1))
+        torch.save(state, 'margin_checkpoints/model_{}_margin_epoch_{}.pt'.format(model_architecture, epoch+1))
 
     # Training loop end
     total_time_end = time.time()
